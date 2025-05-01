@@ -1,1 +1,126 @@
 Wireshark (using tshark) to capture and process network packets, then prepares the data for Splunk ingestion. This script will convert .pcap files to a Splunk-readable CSV format and monitor a directory for new captures, suitable for integration with Splunk's PCAP Analyzer or file monitoring inputs.
+
+import os
+import subprocess
+import time
+import csv
+import logging
+from datetime import datetime
+import shutil
+
+# Configure logging for Splunk compatibility
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='wireshark_splunk.log'
+)
+logger = logging.getLogger('WiresharkSplunkAutomation')
+
+# Configuration
+TSHARK_PATH = "tshark"  # Adjust if tshark is not in PATH
+CAPTURE_DIR = "/var/tmp/pcaps"  # Directory to monitor for .pcap files
+OUTPUT_DIR = "/var/tmp/pcaps/converted"  # Directory for CSV output
+SPLUNK_INPUT_DIR = "/var/tmp/splunk_pcaps"  # Splunk monitored directory
+FIELDS = [
+    "frame.time", "ip.src", "ip.dst", "ip.proto", "tcp.srcport", "tcp.dstport",
+    "udp.srcport", "udp.dstport", "http.request.method", "dns.qry.name"
+]  # Fields to extract
+
+def ensure_directories():
+    """Create necessary directories if they don't exist."""
+    for directory in [CAPTURE_DIR, OUTPUT_DIR, SPLUNK_INPUT_DIR]:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            logger.info(f"Created directory: {directory}")
+
+def convert_pcap_to_csv(pcap_file):
+    """Convert a .pcap file to CSV using tshark."""
+    try:
+        base_name = os.path.splitext(os.path.basename(pcap_file))[0]
+        output_csv = os.path.join(OUTPUT_DIR, f"{base_name}.csv")
+        
+        # Build tshark command
+        tshark_cmd = [
+            TSHARK_PATH,
+            "-r", pcap_file,
+            "-T", "fields"
+        ]
+        for field in FIELDS:
+            tshark_cmd.extend(["-e", field])
+        tshark_cmd.extend([
+            "-E", "separator=,",
+            "-E", "quote=d"
+        ])
+        
+        # Run tshark command
+        logger.info(f"Converting {pcap_file} to {output_csv}")
+        with open(output_csv, 'w') as f:
+            result = subprocess.run(tshark_cmd, stdout=f, text=True, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                logger.error(f"tshark failed for {pcap_file}: {result.stderr}")
+                return None
+        
+        # Verify CSV output
+        if os.path.getsize(output_csv) == 0:
+            logger.warning(f"Empty CSV generated for {pcap_file}")
+            os.remove(output_csv)
+            return None
+        
+        logger.info(f"Successfully converted {pcap_file} to {output_csv}")
+        return output_csv
+    except Exception as e:
+        logger.error(f"Error converting {pcap_file}: {str(e)}")
+        return None
+
+def move_to_splunk(csv_file):
+    """Move CSV file to Splunk monitored directory."""
+    try:
+        dest_file = os.path.join(SPLUNK_INPUT_DIR, os.path.basename(csv_file))
+        shutil.move(csv_file, dest_file)
+        logger.info(f"Moved {csv_file} to {dest_file} for Splunk ingestion")
+    except Exception as e:
+        logger.error(f"Error moving {csv_file} to Splunk: {str(e)}")
+
+def monitor_directory():
+    """Monitor CAPTURE_DIR for new .pcap files."""
+    processed_files = set()
+    ensure_directories()
+    
+    logger.info(f"Starting monitoring of {CAPTURE_DIR}")
+    while True:
+        try:
+            for file in os.listdir(CAPTURE_DIR):
+                if file.endswith((".pcap", ".pcapng")) and file not in processed_files:
+                    pcap_path = os.path.join(CAPTURE_DIR, file)
+                    logger.info(f"Detected new file: {pcap_path}")
+                    
+                    # Convert to CSV
+                    csv_file = convert_pcap_to_csv(pcap_path)
+                    if csv_file:
+                        # Move to Splunk input directory
+                        move_to_splunk(csv_file)
+                        processed_files.add(file)
+                    
+                    # Optionally move or delete original .pcap
+                    archive_path = os.path.join(CAPTURE_DIR, "archive", file)
+                    os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+                    shutil.move(pcap_path, archive_path)
+                    logger.info(f"Archived {pcap_path} to {archive_path}")
+            
+            time.sleep(10)  # Check every 10 seconds
+        except Exception as e:
+            logger.error(f"Error in monitoring loop: {str(e)}")
+            time.sleep(60)  # Wait longer on error
+
+def main():
+    """Main function to start the automation."""
+    try:
+        logger.info("Starting Wireshark to Splunk automation")
+        monitor_directory()
+    except KeyboardInterrupt:
+        logger.info("Shutting down automation")
+    except Exception as e:
+        logger.error(f"Fatal error: {str(e)}")
+
+if __name__ == "__main__":
+    main()
