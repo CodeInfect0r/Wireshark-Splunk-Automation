@@ -1,0 +1,1 @@
+Wireshark (using tshark) to capture and process network packets, then prepares the data for Splunk ingestion. This script will convert .pcap files to a Splunk-readable CSV format and monitor a directory for new captures, suitable for integration with Splunk's PCAP Analyzer or file monitoring inputs.
